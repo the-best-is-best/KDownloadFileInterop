@@ -27,7 +27,7 @@ import Foundation
             throw NSError(domain: "Invalid URL", code: -1, userInfo: nil)
         }
 
-        let isDownloadable = await isDownloadableFile(url: url)
+        let isDownloadable = await DownloaderInterop.isDownloadableFile(url: url, headers: customHeaders)
         guard isDownloadable else {
             throw NSError(domain: "Not a downloadable file", code: -2, userInfo: nil)
         }
