@@ -5,20 +5,23 @@
 //  Created by Michelle Raouf on 21/06/2025.
 //
 
-
 import Foundation
 
 @objc public class DownloadManagerInterop: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+
     private var continuation: CheckedContinuation<String, Error>?
     private var currentFileName: String = ""
     private var currentFolderName: String?
-    private var lastProgressUpdate: Date = Date.distantPast
+    private var lastProgressUpdate: Date = .distantPast
+
+    // MARK: - Main Entry
 
     @objc public func downloadFile(
         _ urlString: String,
         fileName: String,
         folderName: String?,
-        customHeaders: [String: String]?
+        customHeaders: [String: String]?,
+        showLiveActivity: Bool
     ) async throws -> String {
         guard let url = URL(string: urlString) else {
             throw NSError(domain: "Invalid URL", code: -1, userInfo: nil)
@@ -28,7 +31,7 @@ import Foundation
         guard isDownloadable else {
             throw NSError(domain: "Not a downloadable file", code: -2, userInfo: nil)
         }
-        
+
         self.currentFileName = fileName
         self.currentFolderName = folderName
 
@@ -42,13 +45,17 @@ import Foundation
 
             let sessionConfig = URLSessionConfiguration.default
             sessionConfig.httpAdditionalHeaders = headers
+            sessionConfig.timeoutIntervalForRequest = 30
+            sessionConfig.timeoutIntervalForResource = .infinity
 
             let session = URLSession(configuration: sessionConfig, delegate: self, delegateQueue: nil)
             let task = session.downloadTask(with: url)
 
-            if #available(iOS 16.1, *) {
+            if showLiveActivity, #available(iOS 16.1, *) {
                 Task {
-                    await ActivityStorage.shared.start(fileName: fileName)
+                    if await ActivityStorage.shared.isActive == false {
+                        await ActivityStorage.shared.start(fileName: fileName)
+                    }
                     await ActivityStorage.shared.update(progress: 0.0, status: "Starting…")
                 }
             }
@@ -57,6 +64,19 @@ import Foundation
         }
     }
 
+    // MARK: - Completion Helper (safe continuation)
+
+    private func complete(with result: Result<String, Error>) {
+        if let continuation {
+            switch result {
+            case .success(let path):
+                continuation.resume(returning: path)
+            case .failure(let error):
+                continuation.resume(throwing: error)
+            }
+            self.continuation = nil
+        }
+    }
 
     // MARK: - URLSessionDownloadDelegate
 
@@ -72,12 +92,13 @@ import Foundation
         let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
         let now = Date()
 
-        // تحديث progress كل 0.2 ثانية فقط لتخفيف الحمل على الواجهة
         if now.timeIntervalSince(lastProgressUpdate) > 0.2 {
             lastProgressUpdate = now
+
             if #available(iOS 16.1, *) {
                 Task {
-                    await ActivityStorage.shared.update(progress: progress, status: "Downloading…")
+                    let percent = Int(progress * 100)
+                    await ActivityStorage.shared.update(progress: progress, status: "Downloading… \(percent)%")
                 }
             }
         }
@@ -88,35 +109,35 @@ import Foundation
         downloadTask: URLSessionDownloadTask,
         didFinishDownloadingTo location: URL
     ) {
-        let fm = FileManager.default
+        let fileManager = FileManager.default
 
-        guard let documentsUrl = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            continuation?.resume(throwing: NSError(domain: "FileManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Could not find documents directory"]))
-            continuation = nil
+        guard let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            complete(with: .failure(NSError(domain: "FileManager", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: "Could not find documents directory"
+            ])))
             return
         }
 
-        let destinationUrl: URL
+        let destinationURL: URL
         if let folderName = currentFolderName, !folderName.isEmpty {
-            let folderUrl = documentsUrl.appendingPathComponent(folderName, isDirectory: true)
-            if !fm.fileExists(atPath: folderUrl.path) {
+            let folderURL = documentsURL.appendingPathComponent(folderName, isDirectory: true)
+            if !fileManager.fileExists(atPath: folderURL.path) {
                 do {
-                    try fm.createDirectory(at: folderUrl, withIntermediateDirectories: true, attributes: nil)
+                    try fileManager.createDirectory(at: folderURL, withIntermediateDirectories: true)
                 } catch {
-                    continuation?.resume(throwing: error)
-                    continuation = nil
+                    complete(with: .failure(error))
                     return
                 }
             }
-            destinationUrl = folderUrl.appendingPathComponent(currentFileName)
+            destinationURL = folderURL.appendingPathComponent(currentFileName)
         } else {
-            destinationUrl = documentsUrl.appendingPathComponent(currentFileName)
+            destinationURL = documentsURL.appendingPathComponent(currentFileName)
         }
 
-        try? fm.removeItem(at: destinationUrl)
+        try? fileManager.removeItem(at: destinationURL)
 
         do {
-            try fm.moveItem(at: location, to: destinationUrl)
+            try fileManager.moveItem(at: location, to: destinationURL)
 
             if #available(iOS 16.1, *) {
                 Task {
@@ -125,7 +146,7 @@ import Foundation
                 }
             }
 
-            continuation?.resume(returning: destinationUrl.path)
+            complete(with: .success(destinationURL.path))
         } catch {
             if #available(iOS 16.1, *) {
                 Task {
@@ -133,14 +154,16 @@ import Foundation
                     await ActivityStorage.shared.end()
                 }
             }
-            continuation?.resume(throwing: error)
-        }
 
-        continuation = nil
+            complete(with: .failure(error))
+        }
     }
 
-    // Handle download errors (network failure, cancel, etc)
-    public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+    public func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
         if let error = error {
             if #available(iOS 16.1, *) {
                 Task {
@@ -148,11 +171,7 @@ import Foundation
                     await ActivityStorage.shared.end()
                 }
             }
-            continuation?.resume(throwing: error)
-            continuation = nil
+            complete(with: .failure(error))
         }
     }
 }
-
-
-

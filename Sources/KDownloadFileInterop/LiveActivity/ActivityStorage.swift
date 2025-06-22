@@ -12,27 +12,40 @@
 @available(iOS 16.1, *)
 actor ActivityStorage {
     static let shared = ActivityStorage()
-    
-    private var activity: Activity<DownloadAttributes>? = nil
+        private var activity: Activity<DownloadAttributes>?
 
-    func start(fileName: String) async {
-        let attributes = DownloadAttributes(fileName: fileName)
-        let initialState = DownloadAttributes.ContentState(progress: 0.0, status: "Starting")
-        do {
-            activity = try Activity.request(attributes: attributes, contentState: initialState)
-        } catch {
-            print("❌ Failed to start activity: \(error)")
+        var isActive: Bool {
+            activity != nil
         }
-    }
 
-    func update(progress: Double, status: String) async {
-        let newState = DownloadAttributes.ContentState(progress: progress, status: status)
-        await activity?.update(using: newState)
-    }
+        func start(fileName: String) async {
+            guard activity == nil else { return }
 
-    func end() async {
-        await activity?.end(dismissalPolicy: .immediate)
-        activity = nil
-    }
+            let attributes = DownloadAttributes(fileName: fileName)
+            let state = DownloadAttributes.ContentState(progress: 0.0, status: "Starting…")
+
+            do {
+                activity = try Activity<DownloadAttributes>.request(
+                    attributes: attributes,
+                    contentState: state,
+                    pushType: nil
+                )
+            } catch {
+                print("Failed to start Live Activity: \(error)")
+            }
+        }
+
+        func update(progress: Double, status: String) async {
+            guard let activity else { return }
+            let newState = DownloadAttributes.ContentState(progress: progress, status: status)
+            await activity.update(using: newState)
+        }
+
+        func end() async {
+            guard let activity else { return }
+            await activity.end(dismissalPolicy: .immediate)
+            self.activity = nil
+        }
+
 }
 #endif
