@@ -11,9 +11,9 @@ import QuickLook
 import ObjectiveC.runtime
 
 class FileOpenerUIKitImpl: NSObject {
-    @objc public static func open(filePath: String) {
+    static func open(filePath: String) {
         DispatchQueue.main.async {
-            let dataSourceKey = UnsafeRawPointer(bitPattern: "com.myapp.FileOpener.dataSourceKey".hashValue)!
+            let dataSourceKey = UnsafeRawPointer(bitPattern: "io.github.kdownload_file_interop.FileOpener.dataSourceKey".hashValue)!
 
             guard
                 let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,

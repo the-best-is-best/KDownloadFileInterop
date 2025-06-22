@@ -18,11 +18,11 @@ let package = Package(
             name: "KDownloadFileInterop",
             swiftSettings: [
                 .define("LIVE_ACTIVITY_ENABLED", .when(platforms: [.iOS], configuration: .release)),
-                // .unsafeFlags([
-                //     "-emit-objc-header",
-                //     "-emit-objc-header-path", "./Headers/KDownloadFileInterop-Swift.h"
-                // ])
-            ]
+//                 .unsafeFlags([
+//                     "-emit-objc-header",
+//                     "-emit-objc-header-path", "./Headers/KDownloadFileInterop-Swift.h"
+//                 ])
+//            ]
         )
     ]
 )
