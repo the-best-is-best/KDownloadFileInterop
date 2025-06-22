@@ -22,7 +22,7 @@ let package = Package(
 //                     "-emit-objc-header",
 //                     "-emit-objc-header-path", "./Headers/KDownloadFileInterop-Swift.h"
 //                 ])
-//            ]
+            ]
         )
     ]
 )
