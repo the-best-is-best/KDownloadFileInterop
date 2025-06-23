@@ -9,14 +9,20 @@ import Foundation
 
 @objc public class DownloadManagerInterop: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
 
-    private var continuation: CheckedContinuation<String, Error>?
-    private var currentFileName: String = ""
-    private var currentFolderName: String?
-    private var lastProgressUpdate: Date = .distantPast
+    public static let shared = DownloadManagerInterop()
 
-    // MARK: - Main Entry
+    private override init() {
+        super.init()
+    }
 
-    @objc public func downloadFile(
+    private var continuations: [Int: CheckedContinuation<String, Error>] = [:]
+    private var fileNames: [Int: String] = [:]
+    private var folderNames: [Int: String?] = [:]
+    private var showLiveActivities: [Int: Bool] = [:]
+    private var lastProgressUpdates: [Int: Date] = [:]
+
+    @objc
+    public func downloadFile(
         _ urlString: String,
         fileName: String,
         folderName: String?,
@@ -32,14 +38,9 @@ import Foundation
             throw NSError(domain: "Not a downloadable file", code: -2, userInfo: nil)
         }
 
-        self.currentFileName = fileName
-        self.currentFolderName = folderName
-
         let userAgent = await getUserAgent()
 
         return try await withCheckedThrowingContinuation { continuation in
-            self.continuation = continuation
-
             var headers = customHeaders ?? [:]
             headers["User-Agent"] = userAgent
 
@@ -50,31 +51,23 @@ import Foundation
 
             let session = URLSession(configuration: sessionConfig, delegate: self, delegateQueue: nil)
             let task = session.downloadTask(with: url)
+            let id = task.taskIdentifier
+
+            // Store info for this task
+            continuations[id] = continuation
+            fileNames[id] = fileName
+            folderNames[id] = folderName
+            showLiveActivities[id] = showLiveActivity
+            lastProgressUpdates[id] = .distantPast
 
             if showLiveActivity, #available(iOS 16.1, *) {
                 Task {
-                    if await ActivityStorage.shared.isActive == false {
-                        await ActivityStorage.shared.start(fileName: fileName)
-                    }
-                    await ActivityStorage.shared.update(progress: 0.0, status: "Starting…")
+                    await ActivityStorage.shared.start(fileName: fileName)
+                    await ActivityStorage.shared.update(fileName: fileName, progress: 0.0, status: "Starting…")
                 }
             }
 
             task.resume()
-        }
-    }
-
-    // MARK: - Completion Helper (safe continuation)
-
-    private func complete(with result: Result<String, Error>) {
-        if let continuation {
-            switch result {
-            case .success(let path):
-                continuation.resume(returning: path)
-            case .failure(let error):
-                continuation.resume(throwing: error)
-            }
-            self.continuation = nil
         }
     }
 
@@ -89,16 +82,24 @@ import Foundation
     ) {
         guard totalBytesExpectedToWrite > 0 else { return }
 
+        let id = downloadTask.taskIdentifier
+        guard let fileName = fileNames[id],
+              let showLive = showLiveActivities[id] else { return }
+
         let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
         let now = Date()
 
-        if now.timeIntervalSince(lastProgressUpdate) > 0.2 {
-            lastProgressUpdate = now
+        if now.timeIntervalSince(lastProgressUpdates[id] ?? .distantPast) > 0.2 {
+            lastProgressUpdates[id] = now
 
-            if #available(iOS 16.1, *) {
+            if showLive, #available(iOS 16.1, *) {
                 Task {
                     let percent = Int(progress * 100)
-                    await ActivityStorage.shared.update(progress: progress, status: "Downloading… \(percent)%")
+                    await ActivityStorage.shared.update(
+                        fileName: fileName,
+                        progress: progress,
+                        status: "Downloading… \(percent)%"
+                    )
                 }
             }
         }
@@ -109,29 +110,28 @@ import Foundation
         downloadTask: URLSessionDownloadTask,
         didFinishDownloadingTo location: URL
     ) {
-        let fileManager = FileManager.default
+        let id = downloadTask.taskIdentifier
 
+        guard let fileName = fileNames[id],
+              let folderName = folderNames[id],
+              let showLive = showLiveActivities[id] else {
+            complete(id: id, with: .failure(NSError(domain: "Missing metadata", code: -99)))
+            return
+        }
+
+        let fileManager = FileManager.default
         guard let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            complete(with: .failure(NSError(domain: "FileManager", code: -1, userInfo: [
-                NSLocalizedDescriptionKey: "Could not find documents directory"
-            ])))
+            complete(id: id, with: .failure(NSError(domain: "FileManager", code: -1)))
             return
         }
 
         let destinationURL: URL
-        if let folderName = currentFolderName, !folderName.isEmpty {
+        if let folderName, !folderName.isEmpty {
             let folderURL = documentsURL.appendingPathComponent(folderName, isDirectory: true)
-            if !fileManager.fileExists(atPath: folderURL.path) {
-                do {
-                    try fileManager.createDirectory(at: folderURL, withIntermediateDirectories: true)
-                } catch {
-                    complete(with: .failure(error))
-                    return
-                }
-            }
-            destinationURL = folderURL.appendingPathComponent(currentFileName)
+            try? fileManager.createDirectory(at: folderURL, withIntermediateDirectories: true)
+            destinationURL = folderURL.appendingPathComponent(fileName)
         } else {
-            destinationURL = documentsURL.appendingPathComponent(currentFileName)
+            destinationURL = documentsURL.appendingPathComponent(fileName)
         }
 
         try? fileManager.removeItem(at: destinationURL)
@@ -139,23 +139,22 @@ import Foundation
         do {
             try fileManager.moveItem(at: location, to: destinationURL)
 
-            if #available(iOS 16.1, *) {
+            if showLive, #available(iOS 16.1, *) {
                 Task {
-                    await ActivityStorage.shared.update(progress: 1.0, status: "Done ✅")
-                    await ActivityStorage.shared.end()
+                    await ActivityStorage.shared.update(fileName: fileName, progress: 1.0, status: "Done ✅")
+                    await ActivityStorage.shared.end(fileName: fileName)
                 }
             }
 
-            complete(with: .success(destinationURL.path))
+            complete(id: id, with: .success(destinationURL.path))
         } catch {
-            if #available(iOS 16.1, *) {
+            if showLive, #available(iOS 16.1, *) {
                 Task {
-                    await ActivityStorage.shared.update(progress: 1.0, status: "Failed ❌")
-                    await ActivityStorage.shared.end()
+                    await ActivityStorage.shared.update(fileName: fileName, progress: 1.0, status: "Failed ❌")
+                    await ActivityStorage.shared.end(fileName: fileName)
                 }
             }
-
-            complete(with: .failure(error))
+            complete(id: id, with: .failure(error))
         }
     }
 
@@ -164,14 +163,39 @@ import Foundation
         task: URLSessionTask,
         didCompleteWithError error: Error?
     ) {
-        if let error = error {
-            if #available(iOS 16.1, *) {
-                Task {
-                    await ActivityStorage.shared.update(progress: 1.0, status: "Failed ❌")
-                    await ActivityStorage.shared.end()
-                }
+        guard let error = error else { return }
+        let id = task.taskIdentifier
+
+        if let fileName = fileNames[id],
+           let showLive = showLiveActivities[id],
+           showLive,
+           #available(iOS 16.1, *) {
+            Task {
+                await ActivityStorage.shared.update(fileName: fileName, progress: 1.0, status: "Failed ❌")
+                await ActivityStorage.shared.end(fileName: fileName)
             }
-            complete(with: .failure(error))
         }
+
+        complete(id: id, with: .failure(error))
+    }
+
+    // MARK: - Safe Completion
+
+    private func complete(id: Int, with result: Result<String, Error>) {
+        if let continuation = continuations[id] {
+            switch result {
+            case .success(let path):
+                continuation.resume(returning: path)
+            case .failure(let error):
+                continuation.resume(throwing: error)
+            }
+        }
+
+        // Cleanup
+        continuations.removeValue(forKey: id)
+        fileNames.removeValue(forKey: id)
+        folderNames.removeValue(forKey: id)
+        showLiveActivities.removeValue(forKey: id)
+        lastProgressUpdates.removeValue(forKey: id)
     }
 }
