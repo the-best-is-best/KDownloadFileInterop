@@ -20,6 +20,8 @@ import Foundation
     private var folderNames: [Int: String?] = [:]
     private var showLiveActivities: [Int: Bool] = [:]
     private var lastProgressUpdates: [Int: Date] = [:]
+    private var saveInDownloadFolders: [Int: Bool] = [:]
+    private var noDoubtableFiles: [Int: Bool] = [:]
 
     @objc
     public func downloadFile(
@@ -27,19 +29,22 @@ import Foundation
         fileName: String,
         folderName: String?,
         customHeaders: [String: String]?,
-        showLiveActivity: Bool
+        showLiveActivity: Bool,
+        saveInDownloadFolder: Bool,
+        noDoubtableFile: Bool
     ) async throws -> String {
         guard let url = URL(string: urlString) else {
             throw NSError(domain: "Invalid URL", code: -1, userInfo: nil)
         }
-
+        
+        // Always perform the downloadable file check
         let isDownloadable = await DownloaderInterop.isDownloadableFile(url: url, headers: customHeaders)
         guard isDownloadable else {
             throw NSError(domain: "Not a downloadable file", code: -2, userInfo: nil)
         }
-
+        
         let userAgent = await getUserAgent()
-
+        
         return try await withCheckedThrowingContinuation { continuation in
             var headers = customHeaders ?? [:]
             headers["User-Agent"] = userAgent
@@ -58,6 +63,8 @@ import Foundation
             fileNames[id] = fileName
             folderNames[id] = folderName
             showLiveActivities[id] = showLiveActivity
+            saveInDownloadFolders[id] = saveInDownloadFolder
+            noDoubtableFiles[id] = noDoubtableFile
             lastProgressUpdates[id] = .distantPast
 
             if showLiveActivity, #available(iOS 16.1, *) {
@@ -114,28 +121,57 @@ import Foundation
 
         guard let fileName = fileNames[id],
               let folderName = folderNames[id],
-              let showLive = showLiveActivities[id] else {
+              let showLive = showLiveActivities[id],
+              let saveInDownloadFolder = saveInDownloadFolders[id],
+              let noDoubtableFile = noDoubtableFiles[id] else {
             complete(id: id, with: .failure(NSError(domain: "Missing metadata", code: -99)))
             return
         }
 
         let fileManager = FileManager.default
-        guard let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            complete(id: id, with: .failure(NSError(domain: "FileManager", code: -1)))
-            return
+        let baseDirectoryURL: URL
+        if saveInDownloadFolder {
+            guard let downloadsURL = fileManager.urls(for: .downloadsDirectory, in: .userDomainMask).first else {
+                complete(id: id, with: .failure(NSError(domain: "FileManager", code: -1)))
+                return
+            }
+            baseDirectoryURL = downloadsURL
+        } else {
+            guard let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
+                complete(id: id, with: .failure(NSError(domain: "FileManager", code: -1)))
+                return
+            }
+            baseDirectoryURL = documentsURL
         }
 
-        let destinationURL: URL
+        var destinationURL: URL
         if let folderName, !folderName.isEmpty {
-            let folderURL = documentsURL.appendingPathComponent(folderName, isDirectory: true)
+            let folderURL = baseDirectoryURL.appendingPathComponent(folderName, isDirectory: true)
             try? fileManager.createDirectory(at: folderURL, withIntermediateDirectories: true)
             destinationURL = folderURL.appendingPathComponent(fileName)
         } else {
-            destinationURL = documentsURL.appendingPathComponent(fileName)
+            destinationURL = baseDirectoryURL.appendingPathComponent(fileName)
         }
 
-        try? fileManager.removeItem(at: destinationURL)
-
+        // New logic for file saving based on noDoubtableFile parameter
+        if noDoubtableFile {
+            // Delete the old file if it exists
+            try? fileManager.removeItem(at: destinationURL)
+        } else {
+            // Find a unique filename by appending a number
+            var counter = 1
+            var uniqueDestinationURL = destinationURL
+            let fileNameWithoutExtension = (fileName as NSString).deletingPathExtension
+            let fileExtension = (fileName as NSString).pathExtension
+            
+            while fileManager.fileExists(atPath: uniqueDestinationURL.path) {
+                let newFileName = "\(fileNameWithoutExtension) (\(counter)).\(fileExtension)"
+                uniqueDestinationURL = destinationURL.deletingLastPathComponent().appendingPathComponent(newFileName)
+                counter += 1
+            }
+            destinationURL = uniqueDestinationURL
+        }
+        
         do {
             try fileManager.moveItem(at: location, to: destinationURL)
 
@@ -167,9 +203,9 @@ import Foundation
         let id = task.taskIdentifier
 
         if let fileName = fileNames[id],
-           let showLive = showLiveActivities[id],
-           showLive,
-           #available(iOS 16.1, *) {
+            let showLive = showLiveActivities[id],
+            showLive,
+            #available(iOS 16.1, *) {
             Task {
                 await ActivityStorage.shared.update(fileName: fileName, progress: 1.0, status: "Failed ❌")
                 await ActivityStorage.shared.end(fileName: fileName)
@@ -197,5 +233,7 @@ import Foundation
         folderNames.removeValue(forKey: id)
         showLiveActivities.removeValue(forKey: id)
         lastProgressUpdates.removeValue(forKey: id)
+        saveInDownloadFolders.removeValue(forKey: id)
+        noDoubtableFiles.removeValue(forKey: id)
     }
 }
