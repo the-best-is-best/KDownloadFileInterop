@@ -130,18 +130,25 @@ import Foundation
 
         let fileManager = FileManager.default
         let baseDirectoryURL: URL
+
         if saveInDownloadFolder {
-            guard let downloadsURL = fileManager.urls(for: .downloadsDirectory, in: .userDomainMask).first else {
-                complete(id: id, with: .failure(NSError(domain: "FileManager", code: -1)))
-                return
-            }
-            baseDirectoryURL = downloadsURL
-        } else {
+            // الحالة: saveInDownloadFolder = true
+            // يتم الحفظ في مجلد المستندات (Documents) لكي يراه المستخدم.
             guard let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
                 complete(id: id, with: .failure(NSError(domain: "FileManager", code: -1)))
                 return
             }
-            baseDirectoryURL = documentsURL
+            let downloadsFolderURL = documentsURL.appendingPathComponent("Downloads", isDirectory: true)
+            try? fileManager.createDirectory(at: downloadsFolderURL, withIntermediateDirectories: true)
+            baseDirectoryURL = downloadsFolderURL
+        } else {
+            // الحالة: saveInDownloadFolder = false
+            // يتم الحفظ في مجلد Application Support، ليكون مخفيًا ولا يتم حذفه.
+            guard let applicationSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+                complete(id: id, with: .failure(NSError(domain: "FileManager", code: -1)))
+                return
+            }
+            baseDirectoryURL = applicationSupportURL
         }
 
         var destinationURL: URL
@@ -152,6 +159,8 @@ import Foundation
         } else {
             destinationURL = baseDirectoryURL.appendingPathComponent(fileName)
         }
+
+      
 
         // New logic for file saving based on noDoubtableFile parameter
         if noDoubtableFile {
